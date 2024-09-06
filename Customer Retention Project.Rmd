@@ -1,0 +1,317 @@
+---
+title: 'Project #2'
+author: "Emily Byrne"
+date: "2022-11-29"
+output: html_document
+---
+
+# Project 2 {.tabset}
+
+## Packages Required {.tabset}
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(vip)
+library(dplyr)
+library(ggplot2)
+library(rsample)
+library(caret)
+library(stringr)
+library(recipes)
+library(parsnip)
+library(glmnet)
+library(earth)
+library(pdp)
+library(baguette)
+library(ranger)
+library(rpart.plot)
+```
+
+## Data Set {.tabset}
+```{r}
+cust_ret <- read_csv("customer_retention.csv")
+
+glimpse(cust_ret)
+```
+
+## Data Preparation & Exploratory Data Analysis {.tabset}
+
+### Data Preparation {.tabset}
+    
+```{r}
+cust_ret <- na.omit(cust_ret)
+
+cust_ret <- cust_ret %>% 
+  mutate(SeniorCitizen = ifelse(SeniorCitizen == "1", "Yes", "No"))
+
+cust_ret <- cust_ret %>% ## 1 = Current, 0 = Left
+  mutate(Status = ifelse(Status == "Current", "1", "0"))
+
+cust_ret <- cust_ret %>%
+  mutate(Status = as.integer(Status))
+
+prop.table(table(cust_ret$Status))
+```
+
+### Exploratory Data Analysis {.tabset}
+    
+```{r}
+prop.table(table(cust_ret$Status, cust_ret$Gender))
+
+cust_ret <- cust_ret %>% 
+  select(-Gender)
+## there is no discrimination between genders so this variable will be removed
+```
+
+```{r}
+cust_ret <- cust_ret %>% 
+  filter(InternetService != "No") %>% 
+  droplevels()
+## We don't want to push a telecom business on people with no phone service
+```
+
+```{r}
+prop.table(table(cust_ret$Status))
+## Our data of who left(0) and who is current(1) has changed since we dropped unwanted variables
+```
+
+```{r}
+table(cust_ret$Status)
+```
+
+```{r}
+ggplot(cust_ret, aes(Tenure)) + ## plot of Tenure and Status
+  geom_histogram() +
+  facet_wrap(~Status)
+```
+
+```{r}
+ggplot(cust_ret, aes(Tenure)) + ## Fiber Optic seems to make people stay longer
+  geom_histogram() +
+  facet_wrap(~InternetService)
+```
+
+```{r}
+glimpse(cust_ret)
+```
+
+
+```{r}
+set.seed(123)  # for reproducibility
+split <- initial_split(cust_ret, prop = .7, strata = "Status")
+custret_train <- training(split)
+custret_test  <- testing(split)
+
+custret_train %>%
+   summarize(correlation = cor(Tenure, Status))
+
+custret_train %>%
+   summarize(correlation = cor(TotalCharges, Status))
+```
+
+```{r}
+prop.table(table(custret_train$Status))
+```
+
+```{r}
+prop.table(table(custret_test$Status))
+```
+
+```{r}
+dim(custret_train)
+```
+
+```{r}
+dim(custret_test)
+```
+
+## Machine Learning {.tabset}
+   
+### Logistic Regression Model {.tabset}
+```{r}
+cust_ret <- cust_ret %>%
+  mutate(Status = as.factor(Status))
+```
+
+
+```{r}
+set.seed(123)
+split <- initial_split(cust_ret, prop = 0.7, strata = Status)
+custret_train <- training(split)
+custret_test <- testing(split)
+
+set.seed(123)
+kfold <- vfold_cv(custret_train, v = 5)
+
+results <- logistic_reg() %>%
+fit_resamples(Status ~ ., kfold)
+
+collect_metrics(results)
+```
+
+### Decision Tree Model {.tabset}
+```{r}
+set.seed(123)
+split <- initial_split(cust_ret, prop = 0.7, strata = Status)
+custret_train <- training(split)
+custret_test <- testing(split)
+
+dt_mod <- decision_tree(mode = "classification") %>%
+set_engine("rpart")
+
+mod_recipe <- recipe(Status ~ ., data = custret_train)
+
+dt_fit <- workflow() %>%
+add_recipe(mod_recipe) %>%
+add_model(dt_mod) %>%
+fit(data = custret_train)
+
+set.seed(123)
+kfold <- vfold_cv(custret_train, v = 5)
+
+dt_results <- fit_resamples(dt_mod, mod_recipe, kfold)
+
+collect_metrics(dt_results)
+
+dt_mod <- decision_tree(
+mode = "classification",
+cost_complexity = tune(),
+tree_depth = tune(),
+min_n = tune()
+) %>%
+set_engine("rpart")
+
+dt_hyper_grid <- grid_regular(
+cost_complexity(),
+tree_depth(),
+min_n(),
+levels = 5
+)
+
+set.seed(123)
+dt_results <- tune_grid(dt_mod, mod_recipe, resamples = kfold, grid = dt_hyper_grid)
+
+show_best(dt_results, metric = "roc_auc")
+```
+
+### Random Forest Model {.tabset}
+```{r}
+set.seed(123)
+split <- initial_split(cust_ret, prop = 0.7, strata = Status)
+custret_train <- training(split)
+custret_test <- testing(split)
+
+mod_recipe <- recipe(Status ~ ., data = custret_train)
+
+rf_mod <- rand_forest(mode = "classification") %>%
+set_engine("ranger")
+
+set.seed(123)
+kfold <- vfold_cv(custret_train, v = 5)
+
+rf_results <- fit_resamples(rf_mod, mod_recipe, kfold)
+
+collect_metrics(rf_results)
+
+rf_mod <- rand_forest(
+mode = "classification",
+trees = tune(),
+mtry = tune(),
+min_n = tune()
+) %>%
+set_engine("ranger", importance = "impurity")
+
+rf_hyper_grid <- grid_regular(
+trees(range = c(200, 800)),
+mtry(range = c(5, 20)),
+min_n(range = c(1, 10)),
+levels = 5
+)
+
+set.seed(123)
+rf_results <- tune_grid(rf_mod, mod_recipe, resamples = kfold, grid = rf_hyper_grid)
+
+show_best(rf_results, metric = "roc_auc")
+```
+
+### Optimal Model {.tabset}
+```{r}
+final_fit <- logistic_reg() %>%
+fit(Status ~ ., data = custret_train)
+tidy(final_fit)
+
+final_fit %>%
+predict(custret_test) %>%
+bind_cols(custret_test %>% select(Status)) %>%
+conf_mat(truth = Status, estimate = .pred_class)
+
+vip(final_fit$fit, num_features = 3)
+```
+
+## Business Analysis Conclusion {.tabset}
+
+### Findings {.tabset}
+```{r}
+cust_churn <- custret_test %>% 
+  filter(Status == "0") #collecting customers we predict will leave 
+
+cust_churn
+```
+
+```{r}
+monthly_loss <- sum(cust_churn$MonthlyCharges) #calculating predicted loss in revenue per month
+
+monthly_loss
+```
+
+```{r}
+total_loss <- sum(cust_churn$TotalCharges) #calculating predicted loss in revenue
+
+total_loss
+```
+
+```{r}
+custchurn_shortten <- cust_churn %>%
+  filter(Tenure <= "25") #collecting customers we predict will leave with tenures shorter than 25 years 
+
+custchurn_shortten
+```
+
+```{r}
+totalcosts_shortten <- sum(custchurn_shortten$TotalCharges)
+
+totalcosts_shortten
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
